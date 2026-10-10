@@ -1,0 +1,73 @@
+# SigHunt – TryHackMe Writeup
+
+## Scope
+Develop and tune Sigma rules to detect a multi-stage ransomware attack using Windows Sysmon logs.
+
+## Attack Chain
+- Malicious HTA execution through mshta.
+- Payload download using Certutil.
+- Netcat reverse-shell execution.
+- PowerUp privilege-escalation enumeration.
+- Service binary modification.
+- RunOnce persistence.
+- File collection using 7-Zip.
+- Data exfiltration using cURL.
+- Ransomware-associated `.huntme` file creation.
+
+## Tools
+- Sigma rules and YAML.
+- Sysmon event logs.
+- Sigma Rule Validator.
+
+## Detection Development
+- Combined executable paths, command-line arguments, and parent-process context.
+- Used `Image|endswith` to identify executable names.
+- Used `CommandLine|contains|all` to require multiple command markers.
+- Refined broad detections to reduce false positives.
+
+## Example Rules
+
+### Malicious mshta Execution
+```yaml
+detection:
+    selection:
+        EventID: 1
+        Image|endswith: '\mshta.exe'
+        ParentImage|endswith: '\chrome.exe'
+        CommandLine|contains: '.hta'
+    condition: selection
+```
+
+### Netcat Reverse Shell
+```yaml
+detection:
+    selection:
+        EventID: 1
+        Image|endswith: '\nc.exe'
+        CommandLine|contains|all:
+            - '-e'
+            - 'cmd.exe'
+    condition: selection
+```
+
+## Rule Tuning
+- Corrected YAML indentation and duplicate metadata.
+- Removed an independent Netcat hash match that introduced a false positive.
+- Added the RunOnce registry path to narrow a generic registry-modification rule.
+- Checked true positives, false positives, and false negatives after changes.
+
+## Impact
+The attack chain covers remote execution, persistence, data theft, and ransomware impact.
+
+## Defensive Recommendations
+- Monitor suspicious use of mshta, Certutil, and script interpreters.
+- Investigate service binary-path and RunOnce changes.
+- Correlate archive creation with subsequent external uploads.
+- Combine process and file telemetry rather than relying only on filenames or hashes.
+
+## Lessons Learned
+- **Context** separates suspicious behavior from legitimate tool usage.
+- Overly broad rules create false positives.
+- Overly restrictive conditions can miss malicious activity.
+- Correct YAML structure is essential before testing detection logic.
+- Passing lab tests does not guarantee production-ready coverage.
